@@ -17,7 +17,14 @@ from typing import Any
 import httpx
 from telegram import Update
 from telegram.constants import ParseMode
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+    ConversationHandler,
+    MessageHandler,
+    filters,
+)
 
 
 LOGGER = logging.getLogger("route_split_bot")
@@ -141,25 +148,29 @@ BORDER_POINTS: dict[str, GeoPoint] = {
 
 HELP_TEXT = """<b>Розподіл ставки за кілометражем</b>
 
-Просто надішліть маршрут і ставку:
+Натисніть /start — бот по черзі запитає:
+1. місце завантаження;
+2. перехід;
+3. місце розмитнення;
+4. місце вивантаження;
+5. ставку.
+
+Ставку можна написати так:
+<code>4500е</code>, <code>4500 євро</code>, <code>3500дол</code> або <code>3500$</code>.
+
+Швидкий запит одним повідомленням також працює:
 <code>Гданськ - Ягодин - Київ 3500 дол</code>
 
-Або для євро:
-<code>Роттердам - Ужгород - Одеса 2800 євро</code>
-
-Старий формат також працює:
-<code>/calc 3400 USD | Гданськ | Ягодин | Київ</code>
-
-Якщо погоджений кілометраж уже відомий:
-<code>/manual 3400 USD | 720 | 510</code>
-де спочатку кілометри до кордону, потім — після кордону.
-
 Команди:
+/start — новий покроковий розрахунок
+/cancel — скасувати заповнення
 /rate — поточний курс USD та EUR за НБУ
 /id — ваш Telegram ID
 /help — ця підказка
 
-Відстань розраховується автомобільними дорогами. Перед внесенням у рахунок перевірте знайдені міста та пункт пропуску.\n\nДані маршруту: © OpenStreetMap contributors, OSRM."""
+Відстань розраховується автомобільними дорогами. Перед внесенням у рахунок перевірте знайдені міста та пункт пропуску.
+
+Дані маршруту: © OpenStreetMap contributors, OSRM."""
 
 
 def normalize_key(value: str) -> str:
@@ -202,7 +213,8 @@ def parse_amount_currency(value: str) -> tuple[Decimal, str]:
     lowered = value.casefold()
     if "$" in value or re.search(r"\b(?:usd|дол(?:ар(?:ів|и)?|лар(?:ов|а|ы)?)?)\b", lowered):
         currency = "USD"
-    elif "€" in value or re.search(r"\b(?:eur|euro|євро|евро)\b", lowered):
+    elif ("€" in value or re.search(r"\b(?:eur|euro|євро|евро)\b", lowered)
+          or re.search(r"\d[\d\s\u00a0.,]*\s*[еє]\s*$", lowered)):
         currency = "EUR"
     else:
         raise UserInputError("Після суми вкажіть валюту: USD/$ або EUR/€.")
@@ -238,7 +250,7 @@ def parse_trip_request(text: str) -> TripRequest:
         origin, border, destination_and_rate = (part.strip() for part in route_parts)
         rate_match = re.search(
             r"(?P<rate>(?:[$€]\s*)?\d[\d\s\u00a0.,]*\s*"
-            r"(?:USD|EUR|дол(?:ар(?:ів|и)?|лар(?:ів|ов|а|ы)?)?|євро|евро|[$€]))\s*$",
+            r"(?:USD|EUR|дол(?:ар(?:ів|и)?|лар(?:ів|ов|а|ы)?)?|євро|евро|[еє]|[$€]))\s*$",
             destination_and_rate,
             flags=re.IGNORECASE,
         )
@@ -508,12 +520,29 @@ async def ensure_access(update: Update) -> bool:
     return False
 
 
-def calculation_message(calc: Calculation) -> str:
+def calculation_message(
+    calc: Calculation,
+    customs: GeoPoint | None = None,
+    customs_input: str | None = None,
+) -> str:
     total_km = calc.first_km + calc.second_km
+    route_parts = [calc.request.origin, calc.request.border]
+    if customs_input:
+        route_parts.append(customs_input)
+    route_parts.append(calc.request.destination)
+    route_text = " → ".join(html.escape(part) for part in route_parts)
+
+    verification = [
+        f"• Завантаження: {html.escape(calc.origin.label)}",
+        f"• Перехід: {html.escape(calc.border.label)}",
+    ]
+    if customs is not None:
+        verification.append(f"• Розмитнення: {html.escape(customs.label)}")
+    verification.append(f"• Вивантаження: {html.escape(calc.destination.label)}")
+
     return (
         "<b>🚛 Розподіл ставки за кілометражем</b>\n"
-        f"<b>Маршрут:</b> {html.escape(calc.request.origin)} → "
-        f"{html.escape(calc.request.border)} → {html.escape(calc.request.destination)}\n"
+        f"<b>Маршрут:</b> {route_text}\n"
         f"<b>Ставка:</b> {money(calc.request.amount)} {calc.request.currency} = "
         f"{money(calc.hryvnia.total)} грн\n"
         f"<b>1. До кордону —</b> {money(calc.hryvnia.first)} грн\n"
@@ -522,9 +551,7 @@ def calculation_message(calc: Calculation) -> str:
         f"<b>Курс НБУ:</b> 1 {calc.request.currency} = "
         f"{number(calc.rate, 4)} грн ({html.escape(calc.rate_date)})\n\n"
         "<b>Перевірка знайдених точок:</b>\n"
-        f"• Завантаження: {html.escape(calc.origin.label)}\n"
-        f"• Перехід: {html.escape(calc.border.label)}\n"
-        f"• Вивантаження: {html.escape(calc.destination.label)}"
+        + "\n".join(verification)
     )
 
 
@@ -553,7 +580,141 @@ def manual_message(
     )
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+FORM_LOADING, FORM_BORDER, FORM_CUSTOMS, FORM_DESTINATION, FORM_AMOUNT = range(5)
+FORM_KEY = "route_split_form"
+
+
+async def start_form(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not await ensure_access(update) or not update.effective_message:
+        return ConversationHandler.END
+    context.user_data[FORM_KEY] = {}
+    await update.effective_message.reply_text(
+        "🚛 Новий розрахунок\n\n1/5. Вкажіть місце завантаження:"
+    )
+    return FORM_LOADING
+
+
+async def collect_loading(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data[FORM_KEY]["origin"] = (update.effective_message.text or "").strip()
+    await update.effective_message.reply_text(
+        "2/5. Вкажіть перехід, наприклад: Ягодин або Ужгород:"
+    )
+    return FORM_BORDER
+
+
+async def collect_border(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data[FORM_KEY]["border"] = (update.effective_message.text or "").strip()
+    await update.effective_message.reply_text(
+        "3/5. Вкажіть місто або адресу розмитнення:"
+    )
+    return FORM_CUSTOMS
+
+
+async def collect_customs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data[FORM_KEY]["customs"] = (update.effective_message.text or "").strip()
+    await update.effective_message.reply_text(
+        "4/5. Вкажіть місце вивантаження:"
+    )
+    return FORM_DESTINATION
+
+
+async def collect_destination(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data[FORM_KEY]["destination"] = (update.effective_message.text or "").strip()
+    await update.effective_message.reply_text(
+        "5/5. Вкажіть ставку, наприклад: 4500е або 3500дол:"
+    )
+    return FORM_AMOUNT
+
+
+async def calculate_request(
+    message,
+    request: TripRequest,
+    customs_query: str | None = None,
+) -> None:
+    status = await message.reply_text("⏳ Отримую курс НБУ та шукаю точки маршруту…")
+    try:
+        rate, rate_date = await NBU.rate(request.currency)
+        origin = await ROUTER.resolve_place(request.origin, "завантаження")
+        border = await ROUTER.resolve_border(request.border)
+        customs = None
+        if customs_query:
+            customs = await ROUTER.resolve_place(customs_query, "розмитнення")
+        destination = await ROUTER.resolve_place(request.destination, "вивантаження")
+
+        await status.edit_text("⏳ Будую автомобільний маршрут…")
+        first_km = await ROUTER.distance_km(origin, border)
+        if customs is not None:
+            to_customs_km, to_destination_km = await asyncio.gather(
+                ROUTER.distance_km(border, customs),
+                ROUTER.distance_km(customs, destination),
+            )
+            second_km = to_customs_km + to_destination_km
+        else:
+            second_km = await ROUTER.distance_km(border, destination)
+
+        foreign = split_total(request.amount, first_km, second_km)
+        total_uah = (request.amount * rate).quantize(MONEY, rounding=ROUND_HALF_UP)
+        hryvnia = split_total(total_uah, first_km, second_km)
+        calc = Calculation(
+            request=request,
+            rate=rate,
+            rate_date=rate_date,
+            origin=origin,
+            border=border,
+            destination=destination,
+            first_km=first_km,
+            second_km=second_km,
+            foreign=foreign,
+            hryvnia=hryvnia,
+        )
+        await status.edit_text(
+            calculation_message(calc, customs=customs, customs_input=customs_query),
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+        )
+    except (UserInputError, ExternalServiceError) as exc:
+        await status.edit_text(f"⚠️ {exc}")
+
+
+async def collect_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    message = update.effective_message
+    try:
+        amount, currency = parse_amount_currency(message.text or "")
+    except UserInputError as exc:
+        await message.reply_text(
+            f"⚠️ {exc}\nНапишіть, наприклад: 4500е або 3500дол"
+        )
+        return FORM_AMOUNT
+
+    form = context.user_data.get(FORM_KEY, {})
+    required = ("origin", "border", "customs", "destination")
+    if any(not form.get(field) for field in required):
+        context.user_data.pop(FORM_KEY, None)
+        await message.reply_text("Дані анкети втрачено. Натисніть /start і заповніть ще раз.")
+        return ConversationHandler.END
+
+    request = TripRequest(
+        amount=amount,
+        currency=currency,
+        origin=form["origin"],
+        border=form["border"],
+        destination=form["destination"],
+    )
+    await calculate_request(message, request, customs_query=form["customs"])
+    context.user_data.pop(FORM_KEY, None)
+    return ConversationHandler.END
+
+
+async def cancel_form(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data.pop(FORM_KEY, None)
+    if update.effective_message:
+        await update.effective_message.reply_text(
+            "Заповнення скасовано. Для нового розрахунку натисніть /start."
+        )
+    return ConversationHandler.END
+
+
+async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     del context
     if await ensure_access(update) and update.effective_message:
         await update.effective_message.reply_text(HELP_TEXT, parse_mode=ParseMode.HTML)
@@ -595,39 +756,7 @@ async def calculate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
-    status = await update.effective_message.reply_text("⏳ Отримую курс НБУ та шукаю точки маршруту…")
-    try:
-        rate, rate_date = await NBU.rate(request.currency)
-        origin = await ROUTER.resolve_place(request.origin, "завантаження")
-        border = await ROUTER.resolve_border(request.border)
-        destination = await ROUTER.resolve_place(request.destination, "вивантаження")
-        await status.edit_text("⏳ Будую два автомобільні відрізки…")
-        first_km, second_km = await asyncio.gather(
-            ROUTER.distance_km(origin, border),
-            ROUTER.distance_km(border, destination),
-        )
-        foreign = split_total(request.amount, first_km, second_km)
-        total_uah = (request.amount * rate).quantize(MONEY, rounding=ROUND_HALF_UP)
-        hryvnia = split_total(total_uah, first_km, second_km)
-        calc = Calculation(
-            request=request,
-            rate=rate,
-            rate_date=rate_date,
-            origin=origin,
-            border=border,
-            destination=destination,
-            first_km=first_km,
-            second_km=second_km,
-            foreign=foreign,
-            hryvnia=hryvnia,
-        )
-        await status.edit_text(
-            calculation_message(calc),
-            parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True,
-        )
-    except (UserInputError, ExternalServiceError) as exc:
-        await status.edit_text(f"⚠️ {exc}")
+    await calculate_request(update.effective_message, request)
 
 
 async def calculate_manual(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -671,7 +800,22 @@ def build_application() -> Application:
     if not token:
         raise RuntimeError("BOT_TOKEN is not set")
     application = Application.builder().token(token).build()
-    application.add_handler(CommandHandler(["start", "help"], start))
+    conversation = ConversationHandler(
+        entry_points=[CommandHandler(["start", "new"], start_form)],
+        states={
+            FORM_LOADING: [MessageHandler(filters.TEXT & ~filters.COMMAND, collect_loading)],
+            FORM_BORDER: [MessageHandler(filters.TEXT & ~filters.COMMAND, collect_border)],
+            FORM_CUSTOMS: [MessageHandler(filters.TEXT & ~filters.COMMAND, collect_customs)],
+            FORM_DESTINATION: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, collect_destination)
+            ],
+            FORM_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, collect_amount)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel_form)],
+        allow_reentry=True,
+    )
+    application.add_handler(conversation)
+    application.add_handler(CommandHandler("help", show_help))
     application.add_handler(CommandHandler("id", show_id))
     application.add_handler(CommandHandler("rate", show_rates))
     application.add_handler(CommandHandler("calc", calculate))
