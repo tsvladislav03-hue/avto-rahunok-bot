@@ -510,30 +510,21 @@ async def ensure_access(update: Update) -> bool:
 
 def calculation_message(calc: Calculation) -> str:
     total_km = calc.first_km + calc.second_km
-    first_percent = calc.first_km * Decimal("100") / total_km
-    second_percent = Decimal("100") - first_percent
     return (
-        "<b>🚛 Розподіл ставки за кілометражем</b>\n\n"
+        "<b>🚛 Розподіл ставки за кілометражем</b>\n"
         f"<b>Маршрут:</b> {html.escape(calc.request.origin)} → "
         f"{html.escape(calc.request.border)} → {html.escape(calc.request.destination)}\n"
-        f"<b>Ставка:</b> {money(calc.request.amount)} {calc.request.currency}\n"
+        f"<b>Ставка:</b> {money(calc.request.amount)} {calc.request.currency} = "
+        f"{money(calc.hryvnia.total)} грн\n"
+        f"<b>1. До кордону —</b> {money(calc.hryvnia.first)} грн\n"
+        f"<b>2. Після кордону —</b> {money(calc.hryvnia.second)} грн\n\n"
+        f"<b>Разом:</b> {number(total_km)} км\n"
         f"<b>Курс НБУ:</b> 1 {calc.request.currency} = "
         f"{number(calc.rate, 4)} грн ({html.escape(calc.rate_date)})\n\n"
-        f"<b>1. До кордону — {number(calc.first_km)} км ({number(first_percent)}%)</b>\n"
-        f"{money(calc.foreign.first)} {calc.request.currency}\n"
-        f"{money(calc.hryvnia.first)} грн\n\n"
-        f"<b>2. Після кордону — {number(calc.second_km)} км ({number(second_percent)}%)</b>\n"
-        f"{money(calc.foreign.second)} {calc.request.currency}\n"
-        f"{money(calc.hryvnia.second)} грн\n\n"
-        f"<b>Разом:</b> {number(total_km)} км · "
-        f"{money(calc.foreign.total)} {calc.request.currency} · "
-        f"{money(calc.hryvnia.total)} грн\n\n"
         "<b>Перевірка знайдених точок:</b>\n"
         f"• Завантаження: {html.escape(calc.origin.label)}\n"
         f"• Перехід: {html.escape(calc.border.label)}\n"
-        f"• Вивантаження: {html.escape(calc.destination.label)}\n\n"
-        "<i>Курс: НБУ. Маршрут: © OpenStreetMap contributors, OSRM. "
-        "Онлайн-км можуть відрізнятися від погодженого кілометражу в документах.</i>"
+        f"• Вивантаження: {html.escape(calc.destination.label)}"
     )
 
 
