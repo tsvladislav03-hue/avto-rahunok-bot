@@ -164,6 +164,7 @@ HELP_TEXT = """<b>Розподіл ставки за кілометражем</b
 Команди:
 /start — новий покроковий розрахунок
 /cancel — скасувати заповнення
+Стоп або /stop — скинути помилкові дані та почати спочатку
 /rate — поточний курс USD та EUR за НБУ
 /id — ваш Telegram ID
 /help — ця підказка
@@ -584,7 +585,7 @@ FORM_LOADING, FORM_BORDER, FORM_CUSTOMS, FORM_DESTINATION, FORM_AMOUNT = range(5
 FORM_KEY = "route_split_form"
 START_BUTTON = "🚛 Новий розрахунок"
 START_BUTTON_PATTERN = re.compile(
-    r"^(?:🚛\\s*)?(?:новий розрахунок|старт)$",
+    r"^(?:🚛\\s*)?(?:новий розрахунок|старт|стоп)$",
     flags=re.IGNORECASE,
 )
 START_KEYBOARD = ReplyKeyboardMarkup(
@@ -822,7 +823,7 @@ def build_application() -> Application:
     application = Application.builder().token(token).build()
     conversation = ConversationHandler(
         entry_points=[
-            CommandHandler(["start", "new"], start_form),
+            CommandHandler(["start", "new", "stop"], start_form),
             MessageHandler(filters.Regex(START_BUTTON_PATTERN), start_form),
         ],
         states={
