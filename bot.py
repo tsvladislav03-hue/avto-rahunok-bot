@@ -585,7 +585,7 @@ FORM_LOADING, FORM_BORDER, FORM_CUSTOMS, FORM_DESTINATION, FORM_AMOUNT = range(5
 FORM_KEY = "route_split_form"
 START_BUTTON = "🚛 Новий розрахунок"
 START_BUTTON_PATTERN = re.compile(
-    r"^(?:🚛\\s*)?(?:новий розрахунок|старт|стоп)$",
+    r"^(?:🚛\s*)?(?:новий розрахунок|старт|стоп)$",
     flags=re.IGNORECASE,
 )
 START_KEYBOARD = ReplyKeyboardMarkup(
