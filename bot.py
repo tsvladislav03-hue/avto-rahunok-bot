@@ -15,7 +15,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any
 
 import httpx
-from telegram import Update
+from telegram import ReplyKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
@@ -582,6 +582,15 @@ def manual_message(
 
 FORM_LOADING, FORM_BORDER, FORM_CUSTOMS, FORM_DESTINATION, FORM_AMOUNT = range(5)
 FORM_KEY = "route_split_form"
+START_BUTTON = "🚛 Новий розрахунок"
+START_BUTTON_PATTERN = re.compile(
+    r"^(?:🚛\\s*)?(?:новий розрахунок|старт)$",
+    flags=re.IGNORECASE,
+)
+START_KEYBOARD = ReplyKeyboardMarkup(
+    [[START_BUTTON]],
+    resize_keyboard=True,
+)
 
 
 async def start_form(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -589,7 +598,8 @@ async def start_form(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         return ConversationHandler.END
     context.user_data[FORM_KEY] = {}
     await update.effective_message.reply_text(
-        "🚛 Новий розрахунок\n\n1/5. Вкажіть місце завантаження:"
+        "🚛 Новий розрахунок\n\n1/5. Вкажіть місце завантаження:",
+        reply_markup=START_KEYBOARD,
     )
     return FORM_LOADING
 
@@ -674,6 +684,11 @@ async def calculate_request(
         )
     except (UserInputError, ExternalServiceError) as exc:
         await status.edit_text(f"⚠️ {exc}")
+
+    await message.reply_text(
+        "Щоб порахувати наступну ставку, натисніть кнопку:",
+        reply_markup=START_KEYBOARD,
+    )
 
 
 async def collect_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -783,6 +798,11 @@ async def calculate_manual(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     except (UserInputError, ExternalServiceError) as exc:
         await status.edit_text(f"⚠️ {exc}")
 
+    await update.effective_message.reply_text(
+        "Щоб порахувати наступну ставку, натисніть кнопку:",
+        reply_markup=START_KEYBOARD,
+    )
+
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     LOGGER.exception("Unhandled update error", exc_info=context.error)
@@ -801,7 +821,10 @@ def build_application() -> Application:
         raise RuntimeError("BOT_TOKEN is not set")
     application = Application.builder().token(token).build()
     conversation = ConversationHandler(
-        entry_points=[CommandHandler(["start", "new"], start_form)],
+        entry_points=[
+            CommandHandler(["start", "new"], start_form),
+            MessageHandler(filters.Regex(START_BUTTON_PATTERN), start_form),
+        ],
         states={
             FORM_LOADING: [MessageHandler(filters.TEXT & ~filters.COMMAND, collect_loading)],
             FORM_BORDER: [MessageHandler(filters.TEXT & ~filters.COMMAND, collect_border)],
